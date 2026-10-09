@@ -17,6 +17,8 @@
 
 **简体中文** · [English](README.en.md)
 
+🇨🇳 国内 AtomGit 托管：[atomgit.com/NanmiCoder/cc-haha](https://atomgit.com/NanmiCoder/cc-haha)
+
 </div>
 
 cc-haha 是一个**桌面端 Claude Code 工作台**：多会话与全局搜索、分支 / Worktree 启动、Diff 审阅、内置浏览器预览、图形化权限审批、模型自选（Claude / ChatGPT / Grok / 预设 / 本地端点）、图片生成、MCP 与 SubAgent 可视化管理、Agent Teams 协作工作台、动态 Workflow 编排、模型请求追踪、Computer Use、技能市场、多主题、桌面宠物、H5 远程访问、IM 接入和定时任务，集中在一个 macOS / Windows / Linux APP 里。**在 macOS 上，Computer Use 能操作其他应用，同时不占用你的真实鼠标和键盘。**
