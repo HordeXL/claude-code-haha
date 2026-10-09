@@ -17,8 +17,6 @@
 
 [简体中文](README.md) · **English**
 
-🇨🇳 Also hosted in China on AtomGit: [atomgit.com/NanmiCoder/cc-haha](https://atomgit.com/NanmiCoder/cc-haha)
-
 </div>
 
 cc-haha is a **desktop Claude Code workspace** for macOS, Windows, and Linux: multi-session workspaces, global search, branch / Worktree launch, diff review, built-in browser preview, GUI permission approval, any model — Claude, ChatGPT, Grok, presets, or local endpoints — image generation, visual MCP & SubAgent managers, an Agent Teams workbench, dynamic Workflow orchestration, model trace, Computer Use, skill marketplace, colour themes, desktop pets, H5 remote access, IM integration, and scheduled tasks, all in one app. **On macOS, Computer Use can operate other apps without taking over your physical mouse or keyboard.**
@@ -201,6 +199,7 @@ Thanks to the following open-source projects and community practices for referen
 - [Electron](https://github.com/electron/electron): cross-platform desktop app capabilities and engineering practices.
 - [cc-switch](https://github.com/farion1231/cc-switch): reference for model provider configuration.
 - [LINUX DO](https://linux.do/): a new ideal developer community.
+- [AtomGit](https://atomgit.com/NanmiCoder/cc-haha): code hosting for this project in China.
 
 ---
 
