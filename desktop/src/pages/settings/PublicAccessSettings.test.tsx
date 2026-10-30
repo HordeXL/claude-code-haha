@@ -438,20 +438,26 @@ it('enters phone connection on Quick and keeps the LAN path available without en
   expect(mocks.start).not.toHaveBeenCalled()
 })
 
-it('puts the quick connection action before pending app installation entries', async () => {
+it.each(['Away from home', 'Same Wi-Fi'])('prepares the phone before desktop connection controls for %s', async method => {
   render(<H5AccessSettings />)
   await waitFor(() => expect(enableButton()).not.toBeDisabled())
+  fireEvent.click(screen.getByRole('tab', { name: method }))
   const installation = screen.getByRole('heading', { name: 'Get cc-haha on your phone' })
-  expect(enableButton().compareDocumentPosition(installation) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-  expect(screen.getByRole('radio', { name: 'Quick connection' })).toHaveAttribute('aria-checked', 'true')
+  const methods = screen.getByRole('tablist', { name: 'Connection method' })
+  expect(installation.compareDocumentPosition(methods) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  const desktop = screen.getByRole('heading', { name: 'Then set up this computer' })
+  expect(installation.compareDocumentPosition(desktop) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  expect(desktop.compareDocumentPosition(methods) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  expect(screen.getByRole('tab', { name: method })).toHaveAttribute('aria-selected', 'true')
   expect(mocks.start).not.toHaveBeenCalled()
+  expect(mocks.configure).not.toHaveBeenCalled()
 })
 
 it('moves phone-browser users to LAN and focuses its tab without enabling access', async () => {
   render(<H5AccessSettings />)
   await waitFor(() => expect(enableButton()).not.toBeDisabled())
   const lan = screen.getByRole('tab', { name: 'Same Wi-Fi' })
-  const methods = screen.getByRole('tablist', { name: 'Connection method' }).parentElement!
+  const methods = document.getElementById(screen.getByRole('button', { name: 'Use phone browser' }).getAttribute('aria-controls')!)!
   const scrollIntoView = vi.fn()
   methods.scrollIntoView = scrollIntoView
   expect(screen.getByRole('button', { name: 'Download Android APK' })).toBeDisabled()
