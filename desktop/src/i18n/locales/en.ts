@@ -644,7 +644,7 @@ export const en = {
   "publicAccess.disable": "Turn off",
   "publicAccess.autoStart": "Restore connection when the desktop starts",
   "publicAccess.genericError": "The action failed. Please retry.",
-  "publicAccess.copy": "Copy address",
+  "publicAccess.copy": "Copy pairing link",
   "publicAccess.pairPhone": "Connect a phone",
   "publicAccess.qrAlt": "Scan to pair this phone",
   "publicAccess.qrHint": "Valid for 5 minutes and one use. Confirm the phone on this desktop.",

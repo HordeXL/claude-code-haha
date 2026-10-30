@@ -643,7 +643,7 @@ export const zh: Record<TranslationKey, string> = {
   "publicAccess.disable": "关闭连接入口",
   "publicAccess.autoStart": "随桌面启动恢复连接",
   "publicAccess.genericError": "操作失败，请重试。",
-  "publicAccess.copy": "复制地址",
+  "publicAccess.copy": "复制配对链接",
   "publicAccess.pairPhone": "连接手机",
   "publicAccess.qrAlt": "扫码配对手机",
   "publicAccess.qrHint": "二维码 5 分钟内有效，仅可使用一次。请在桌面确认手机配对。",

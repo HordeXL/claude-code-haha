@@ -645,7 +645,7 @@ export const jp: Record<TranslationKey, string> = {
   "publicAccess.disable": "オフにする",
   "publicAccess.autoStart": "デスクトップ起動時に接続を復元",
   "publicAccess.genericError": "操作に失敗しました。再試行してください。",
-  "publicAccess.copy": "アドレスをコピー",
+  "publicAccess.copy": "ペアリングリンクをコピー",
   "publicAccess.pairPhone": "スマートフォンを接続",
   "publicAccess.qrAlt": "スキャンしてペアリング",
   "publicAccess.qrHint": "有効期限は 5 分、使用は一度限りです。デスクトップで承認してください。",

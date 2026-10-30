@@ -645,7 +645,7 @@ export const zh: Record<TranslationKey, string> = {
   "publicAccess.disable": "關閉連線入口",
   "publicAccess.autoStart": "隨桌面啟動恢復連線",
   "publicAccess.genericError": "操作失敗，請重試。",
-  "publicAccess.copy": "複製位址",
+  "publicAccess.copy": "複製配對連結",
   "publicAccess.pairPhone": "連接手機",
   "publicAccess.qrAlt": "掃碼配對手機",
   "publicAccess.qrHint": "QR 碼 5 分鐘內有效，僅可使用一次。請在桌面確認手機配對。",

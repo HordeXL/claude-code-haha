@@ -647,7 +647,7 @@ export const kr: Record<TranslationKey, string> = {
   "publicAccess.disable": "끄기",
   "publicAccess.autoStart": "데스크톱 시작 시 연결 복원",
   "publicAccess.genericError": "작업에 실패했습니다. 다시 시도하세요.",
-  "publicAccess.copy": "주소 복사",
+  "publicAccess.copy": "페어링 링크 복사",
   "publicAccess.pairPhone": "휴대폰 연결",
   "publicAccess.qrAlt": "스캔하여 휴대폰 페어링",
   "publicAccess.qrHint": "5분간 유효하며 한 번만 사용할 수 있습니다. 데스크톱에서 휴대폰을 승인하세요.",
