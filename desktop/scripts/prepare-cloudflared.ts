@@ -83,10 +83,85 @@ export async function assertPreparedCloudflared(options: Preparation, asset = ge
   }
 }
 
+const DOWNLOAD_TIMEOUT_MS = 10 * 60_000
+const DOWNLOAD_IDLE_TIMEOUT_MS = 60_000
+const DOWNLOAD_ATTEMPTS = 3
+
+class DownloadHttpError extends Error {
+  constructor(readonly status: number) {
+    super(`HTTP ${status}`)
+  }
+}
+
+async function downloadAttempt(url: string): Promise<Uint8Array> {
+  const controller = new AbortController()
+  const timeout = (message: string) => controller.abort(new DOMException(message, 'TimeoutError'))
+  const overallTimer = setTimeout(() => timeout('Download exceeded 10 minutes'), DOWNLOAD_TIMEOUT_MS)
+  let idleTimer: ReturnType<typeof setTimeout> | undefined
+  const resetIdleTimer = () => {
+    clearTimeout(idleTimer)
+    idleTimer = setTimeout(() => timeout('No download progress for 60 seconds'), DOWNLOAD_IDLE_TIMEOUT_MS)
+  }
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
+  let complete = false
+  try {
+    resetIdleTimer()
+    const response = await fetch(url, { redirect: 'follow', signal: controller.signal })
+    if (!response.ok) throw new DownloadHttpError(response.status)
+    if (!response.body) throw new Error('Download response has no body')
+    reader = response.body.getReader()
+    const contentLength = Number(response.headers.get('content-length'))
+    const chunks: Uint8Array[] = []
+    let received = 0
+    let lastProgress = Date.now()
+    resetIdleTimer()
+    while (true) {
+      const result = await reader.read()
+      if (result.done) break
+      if (!result.value.byteLength) continue
+      chunks.push(result.value)
+      received += result.value.byteLength
+      resetIdleTimer()
+      if (Date.now() - lastProgress >= 10_000) {
+        const total = Number.isFinite(contentLength) && contentLength > 0 ? ` / ${(contentLength / 1024 ** 2).toFixed(1)} MiB` : ''
+        console.log(`[prepare-cloudflared] Downloaded ${(received / 1024 ** 2).toFixed(1)} MiB${total}`)
+        lastProgress = Date.now()
+      }
+    }
+    complete = true
+    return Buffer.concat(chunks, received)
+  } catch (error) {
+    // Abort reasons are created above. Do not expose arbitrary network errors:
+    // they may contain a proxy URL with credentials.
+    if (controller.signal.aborted) throw controller.signal.reason
+    throw error
+  } finally {
+    clearTimeout(overallTimer)
+    clearTimeout(idleTimer)
+    if (!complete) controller.abort()
+    reader?.releaseLock()
+  }
+}
+
 async function download(url: string): Promise<Uint8Array> {
-  const response = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(120_000) })
-  if (!response.ok) throw new Error(`[prepare-cloudflared] Download failed (${response.status})`)
-  return new Uint8Array(await response.arrayBuffer())
+  for (let attempt = 1; attempt <= DOWNLOAD_ATTEMPTS; attempt++) {
+    console.log(`[prepare-cloudflared] Downloading ${path.basename(new URL(url).pathname)} (attempt ${attempt}/${DOWNLOAD_ATTEMPTS}, up to 10 minutes)`)
+    try {
+      return await downloadAttempt(url)
+    } catch (error) {
+      const reason = error instanceof DownloadHttpError ? error.message :
+        error instanceof Error && error.name === 'TimeoutError' ? 'Download timed out' : 'Network download failed'
+      const retryable = !(error instanceof DownloadHttpError) || error.status === 408 || error.status === 429 || error.status >= 500
+      if (!retryable || attempt === DOWNLOAD_ATTEMPTS) {
+        throw new Error(`[prepare-cloudflared] ${reason} after ${attempt} attempt${attempt === 1 ? '' : 's'}. Official asset: ${url}\n` +
+          'Build commands use the terminal HTTPS_PROXY / https_proxy, not the desktop app proxy settings. ' +
+          'Set your HTTP proxy in this terminal, or download this asset separately and set CC_HAHA_CLOUDFLARED_ARCHIVE to its local path. SHA256 verification remains required.')
+      }
+      console.warn(`[prepare-cloudflared] ${reason}; retrying (${attempt}/${DOWNLOAD_ATTEMPTS})`)
+      await new Promise(resolve => setTimeout(resolve, attempt * 1000))
+    }
+  }
+  throw new Error('[prepare-cloudflared] Download attempts exhausted')
 }
 
 /** Explicit build dependency preparation. Official release asset digests are pinned above. */
@@ -98,7 +173,11 @@ export async function prepareCloudflared(
   const asset = dependencies.asset ?? officialAsset
   const locations = paths(options)
   if (!options.archivePath) {
-    try { return await assertPreparedCloudflared(options, asset) } catch { /* Explicit preparation can repair its regenerable cache. */ }
+    try {
+      const binary = await assertPreparedCloudflared(options, asset)
+      console.log(`[prepare-cloudflared] Reusing verified cloudflared ${CLOUDFLARED_VERSION} for ${options.targetTriple}`)
+      return binary
+    } catch { /* Explicit preparation can repair its regenerable cache. */ }
   }
   const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'cc-haha-prepare-cloudflared-'))
   let stagedBinary: string | undefined

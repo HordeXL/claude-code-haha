@@ -1,9 +1,10 @@
 // @vitest-environment node
 import { createHash } from 'node:crypto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { inspect } from 'node:util'
 import {
   CLOUDFLARED_LICENSE_FILES,
   CLOUDFLARED_VERSION,
@@ -20,6 +21,9 @@ const sha256 = (value: Uint8Array | string) => createHash('sha256').update(value
 
 afterEach(async () => {
   vi.restoreAllMocks()
+  vi.unstubAllEnvs()
+  vi.clearAllTimers()
+  vi.useRealTimers()
   await Promise.all(temporaryDirectories.splice(0).map(directory => rm(directory, { recursive: true, force: true })))
 })
 
@@ -32,6 +36,267 @@ async function fixture(targetTriple = 'x86_64-unknown-linux-gnu') {
   const download = vi.fn(async () => bytes)
   return { bytes, asset, options, download, desktopRoot }
 }
+
+function observe<T>(promise: Promise<T>) {
+  return promise.then(value => ({ value, error: undefined }), error => ({ value: undefined, error }))
+}
+
+function isolatePreparationTemporaryDirectory(directory: string) {
+  for (const variable of ['TMPDIR', 'TEMP', 'TMP']) vi.stubEnv(variable, directory)
+}
+
+function pacedResponse(bytes: Uint8Array, signal?: AbortSignal | null, parts = 5): Response {
+  let timer: ReturnType<typeof setInterval> | undefined
+  let onAbort: (() => void) | undefined
+  let finished = false
+  const cleanup = () => {
+    if (timer) clearInterval(timer)
+    if (onAbort) signal?.removeEventListener('abort', onAbort)
+    finished = true
+  }
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      let offset = 0
+      const chunkSize = Math.ceil(bytes.byteLength / parts)
+      onAbort = () => {
+        if (finished) return
+        cleanup()
+        controller.error(signal?.reason ?? new DOMException('Aborted', 'AbortError'))
+      }
+      signal?.addEventListener('abort', onAbort, { once: true })
+      if (signal?.aborted) {
+        onAbort()
+        return
+      }
+      timer = setInterval(() => {
+        const end = Math.min(offset + chunkSize, bytes.byteLength)
+        controller.enqueue(bytes.subarray(offset, end))
+        offset = end
+        if (offset === bytes.byteLength) {
+          cleanup()
+          controller.close()
+        }
+      }, 30_000)
+    },
+    cancel() { cleanup() },
+  })
+  return new Response(body, { headers: { 'Content-Length': String(bytes.byteLength) } })
+}
+
+describe('build-time release downloads', () => {
+  it('recovers from a transient timeout through the default downloader', async () => {
+    const f = await fixture()
+    vi.useFakeTimers()
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+      .mockRejectedValueOnce(new DOMException('The operation timed out.', 'TimeoutError'))
+      .mockResolvedValue(new Response(f.bytes))
+    const outcome = observe(prepareCloudflared(f.options, { asset: f.asset }))
+
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalled())
+    await vi.advanceTimersByTimeAsync(10_000)
+    const result = await outcome
+
+    expect(result.error).toBeUndefined()
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+    expect(await readFile(result.value!)).toEqual(f.bytes)
+  })
+
+  it('finishes a slow download that continues making progress beyond two minutes', async () => {
+    const f = await fixture()
+    vi.useFakeTimers()
+    // Native AbortSignal.timeout does not use Vitest's clock. Preserve its
+    // cancellation behavior here so the former two-minute deadline fails.
+    vi.spyOn(AbortSignal, 'timeout').mockImplementation(milliseconds => {
+      const controller = new AbortController()
+      setTimeout(() => controller.abort(new DOMException('The operation timed out.', 'TimeoutError')), milliseconds)
+      return controller.signal
+    })
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+      .mockImplementation(async (_input, init) => pacedResponse(f.bytes, init?.signal))
+    const outcome = observe(prepareCloudflared(f.options, { asset: f.asset }))
+
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalled())
+    await vi.advanceTimersByTimeAsync(151_000)
+    const result = await outcome
+
+    expect(result.error).toBeUndefined()
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+    expect(await readFile(result.value!)).toEqual(f.bytes)
+  })
+
+  it('retries an interrupted response body before staging a verified executable', async () => {
+    const f = await fixture()
+    vi.useFakeTimers()
+    const failedBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(f.bytes.subarray(0, 5))
+        setTimeout(() => controller.error(new TypeError('Connection reset while downloading')), 100)
+      },
+    })
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(failedBody))
+      .mockResolvedValue(new Response(f.bytes))
+    const outcome = observe(prepareCloudflared(f.options, { asset: f.asset }))
+
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalled())
+    await vi.advanceTimersByTimeAsync(10_000)
+    const result = await outcome
+
+    expect(result.error).toBeUndefined()
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+    expect(await readFile(result.value!)).toEqual(f.bytes)
+    expect(await assertPreparedCloudflared(f.options, f.asset)).toBe(result.value)
+  })
+
+  it.each(['headers', 'body'] as const)('cancels stalled %s and retries with a fresh request', async phase => {
+    const f = await fixture()
+    vi.useFakeTimers()
+    const signals: AbortSignal[] = []
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      const signal = init!.signal!
+      signals.push(signal)
+      if (signals.length > 1) return new Response(f.bytes)
+      if (phase === 'headers') {
+        return await new Promise<Response>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+        })
+      }
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(f.bytes.subarray(0, 5))
+          signal.addEventListener('abort', () => controller.error(signal.reason), { once: true })
+        },
+      }))
+    })
+    const outcome = observe(prepareCloudflared(f.options, { asset: f.asset }))
+
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalled())
+    await vi.advanceTimersByTimeAsync(90_000)
+    const attemptsAfterStall = fetchSpy.mock.calls.length
+    // Let a broken idle cutoff settle through its overall bound as well, so
+    // failure reports the missed stall cancellation instead of a test timeout.
+    await vi.advanceTimersByTimeAsync(10 * 60_000)
+    const result = await outcome
+
+    expect(attemptsAfterStall).toBe(2)
+    expect(signals[0].aborted).toBe(true)
+    expect(signals[1]).not.toBe(signals[0])
+    expect(result.error).toBeUndefined()
+    expect(await readFile(result.value!)).toEqual(f.bytes)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('bounds a transfer that keeps making progress without finishing', async () => {
+    const f = await fixture()
+    vi.useFakeTimers()
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+      .mockImplementation(async (_input, init) => pacedResponse(f.bytes, init?.signal, 100))
+    const outcome = observe(prepareCloudflared(f.options, { asset: f.asset }))
+
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalled())
+    await vi.advanceTimersByTimeAsync(31 * 60_000)
+    const result = await outcome
+
+    expect(result.error).toBeInstanceOf(Error)
+    expect(String(result.error)).toMatch(/timed out|timeout/i)
+    expect(fetchSpy).toHaveBeenCalledTimes(3)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it.each([408, 429, 503])('recovers after an HTTP %s response', async status => {
+    const f = await fixture()
+    vi.useFakeTimers()
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response('temporary upstream failure', { status }))
+      .mockResolvedValue(new Response(f.bytes))
+    const outcome = observe(prepareCloudflared(f.options, { asset: f.asset }))
+
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalled())
+    await vi.advanceTimersByTimeAsync(10_000)
+    const result = await outcome
+
+    expect(result.error).toBeUndefined()
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+    expect(await readFile(result.value!)).toEqual(f.bytes)
+  })
+
+  it('bounds repeated timeouts and reports safe recovery context without proxy credentials', async () => {
+    const f = await fixture()
+    isolatePreparationTemporaryDirectory(f.desktopRoot)
+    vi.stubEnv('HTTPS_PROXY', 'http://build-user:build-secret@proxy.invalid:8080')
+    vi.useFakeTimers()
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new DOMException(
+      'The operation timed out through http://build-user:build-secret@proxy.invalid:8080; upstream-secret',
+      'TimeoutError',
+    ))
+    const outcome = observe(prepareCloudflared(f.options, { asset: f.asset }))
+
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalled())
+    await vi.advanceTimersByTimeAsync(10_000)
+    const result = await outcome
+
+    expect(fetchSpy).toHaveBeenCalledTimes(3)
+    expect(result.error).toBeInstanceOf(Error)
+    expect(String(result.error)).toContain(getCloudflaredDownloadUrl(f.options.targetTriple))
+    expect(String(result.error)).toContain('HTTPS_PROXY')
+    expect(String(result.error)).toContain('CC_HAHA_CLOUDFLARED_ARCHIVE')
+    const diagnostics = [inspect(result.error), ...log.mock.calls.flat(), ...warn.mock.calls.flat()].join('\n')
+    for (const secret of ['build-user', 'build-secret', 'proxy.invalid', 'upstream-secret']) {
+      expect(diagnostics).not.toContain(secret)
+    }
+    expect(await readdir(f.desktopRoot)).toEqual([])
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('fails a missing release immediately and cleans temporary downloads', async () => {
+    const f = await fixture()
+    isolatePreparationTemporaryDirectory(f.desktopRoot)
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('not found', { status: 404 }))
+
+    await expect(prepareCloudflared(f.options, { asset: f.asset })).rejects.toThrow('404')
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+    expect(await readdir(f.desktopRoot)).toEqual([])
+  })
+
+  it('does not retry downloaded bytes that fail the pinned checksum', async () => {
+    const f = await fixture()
+    isolatePreparationTemporaryDirectory(f.desktopRoot)
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('unverified bytes'))
+
+    await expect(prepareCloudflared(f.options, { asset: f.asset })).rejects.toThrow('SHA256 mismatch')
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+    expect(await readdir(f.desktopRoot)).toEqual([])
+  })
+
+  it('keeps a verified cache usable when the default network transport is unavailable', async () => {
+    const f = await fixture()
+    const binary = await prepareCloudflared(f.options, { asset: f.asset, download: f.download })
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('public network forbidden'))
+
+    expect(await prepareCloudflared(f.options, { asset: f.asset })).toBe(binary)
+    expect(fetchSpy).not.toHaveBeenCalled()
+    expect(await readFile(binary)).toEqual(f.bytes)
+  })
+
+  it('prepares a checksummed local archive without invoking the default downloader', async () => {
+    const f = await fixture()
+    const archivePath = path.join(f.desktopRoot, 'local-release')
+    await writeFile(archivePath, f.bytes)
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('public network forbidden'))
+
+    const binary = await prepareCloudflared({ ...f.options, archivePath }, { asset: f.asset })
+
+    expect(fetchSpy).not.toHaveBeenCalled()
+    expect(await readFile(binary)).toEqual(f.bytes)
+    expect(await assertPreparedCloudflared(f.options, f.asset)).toBe(binary)
+  })
+})
 
 describe('pinned Cloudflare release assets', () => {
   it.each([
